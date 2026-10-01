@@ -1,0 +1,34 @@
+{
+  "name": "softproof-bench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "纯浏览器 ICC 软打样台：LittleCMS WebAssembly 转换，嵌入配置识别，并排预览/取样，IndexedDB 工程，图片不上传。",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "test:node": "tsx scripts/make-fixtures.ts && tsx scripts/test-node.ts",
+    "test:e2e": "tsx scripts/e2e.ts"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@tsconfig/svelte": "^5.0.8",
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.63.0",
+    "svelte": "^5.57.0",
+    "svelte-check": "^4.7.6",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  },
+  "dependencies": {
+    "@jsquash/jpeg": "^1.6.0",
+    "@jsquash/png": "^3.1.1",
+    "@jsquash/webp": "^1.5.0",
+    "lcms-wasm": "^1.0.5",
+    "pako": "^3.0.2"
+  }
+}
