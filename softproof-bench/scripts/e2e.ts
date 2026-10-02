@@ -86,6 +86,7 @@ async function main() {
   const browser = await chromium.launch({
     headless: true,
     args: ['--use-fake-ui-for-media-stream', '--no-sandbox'],
+    ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
   });
 
   // ---------- Scenario A: embedded sRGB -> CIE RGB ----------

@@ -4,10 +4,24 @@
  * Protocol (messages are plain structured-clone values):
  *
  *  -> { type: 'convert', id, imageBytes, sourceIcc, targetIcc, params }
- *  <-  { type: 'result', id, result? , error? }
+ *  <-  { type: 'result', id, result? , error?, aborted? }
  *
- *  -> { type: 'sample', id, imageBytes, sourceIcc, targetIcc, params, x, y }
+ *  -> { type: 'sample', id, ... }
  *  <-  { type: 'sample-result', id, info?, error? }
+ *
+ *  -> { type: 'cancel', id }
+ *      Cooperative cancellation: sets a flag checked between decode and each
+ *      transform stage. A synchronous WASM transform cannot be interrupted, so
+ *      the cancel takes effect at the next checkpoint; the (late) result is
+ *      then posted as `aborted` and the main thread must discard it.
+ *
+ *  -> { type: '__test-set-fault', fault: string }  (DEV builds only)
+ *      Next convert throws `fault` at its first checkpoint - used to exercise
+ *      the failed -> retry path deterministically in E2E.
+ *
+ *  -> { type: '__test-set-delay', ms: number }      (DEV builds only)
+ *      Each convert sleeps this long after decoding - used to keep an item
+ *      in `converting` while the E2E reloads the page.
  *
  * Profiles and images arrive as ArrayBuffers (zero-copy transfer when sent
  * from the caller with a transfer list; here we clone to keep originals).
@@ -36,20 +50,67 @@ export interface SampleRequest {
   x: number;
   y: number;
 }
-export type WorkerRequest = ConvertRequest | SampleRequest;
+export interface CancelRequest {
+  type: 'cancel';
+  id: number;
+}
+export interface TestFaultRequest {
+  type: '__test-set-fault';
+  fault: string | null;
+}
+export interface TestDelayRequest {
+  type: '__test-set-delay';
+  ms: number;
+}
+export type WorkerRequest = ConvertRequest | SampleRequest | CancelRequest | TestFaultRequest | TestDelayRequest;
+
+const abortFlags = new Map<number, boolean>();
+let testFault: string | null = null;
+let testDelay = 0;
+
+function throwIfAborted(id: number) {
+  if (abortFlags.get(id)) {
+    const e = new Error('aborted');
+    e.name = 'AbortError';
+    throw e;
+  }
+}
 
 self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
   const msg = ev.data;
+  if (msg.type === 'cancel') {
+    abortFlags.set(msg.id, true);
+    return;
+  }
+  if (msg.type === '__test-set-fault') {
+    testFault = msg.fault;
+    return;
+  }
+  if (msg.type === '__test-set-delay') {
+    testDelay = msg.ms;
+    return;
+  }
+  abortFlags.set(msg.id, false);
   try {
     const imageBytes = new Uint8Array(msg.imageBytes);
     const decoded = await decodeImage(imageBytes);
+    throwIfAborted(msg.id);
     const profiles = {
       source: { bytes: new Uint8Array(msg.sourceIcc), description: 'source' },
       target: { bytes: new Uint8Array(msg.targetIcc), description: 'target' },
     };
     if (msg.type === 'convert') {
-      const result = await convert(decoded, profiles, msg.params);
-      // Copy underlying buffers into fresh transferable snapshots.
+      if (testDelay > 0) {
+        await new Promise((r) => setTimeout(r, testDelay));
+      }
+      throwIfAborted(msg.id);
+      if (testFault) {
+        const fault = testFault;
+        testFault = null;
+        throw new Error(fault);
+      }
+      const result = await convert(decoded, profiles, msg.params, () => throwIfAborted(msg.id));
+      throwIfAborted(msg.id);
       self.postMessage(
         {
           type: 'result',
@@ -63,11 +124,15 @@ self.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
       self.postMessage({ type: 'sample-result', id: msg.id, info });
     }
   } catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError';
     self.postMessage({
       type: msg.type === 'sample' ? 'sample-result' : 'result',
       id: msg.id,
       error: err instanceof Error ? err.message : String(err),
+      aborted,
     });
+  } finally {
+    abortFlags.delete(msg.id);
   }
 };
 

@@ -13,36 +13,17 @@
 import { instantiate } from 'lcms-wasm';
 import wasmUrl from 'lcms-wasm/dist/lcms.wasm?url';
 import {
-  INTENT_PERCEPTUAL,
-  INTENT_RELATIVE_COLORIMETRIC,
-  INTENT_SATURATION,
-  INTENT_ABSOLUTE_COLORIMETRIC,
   cmsFLAGS_COPY_ALPHA,
   cmsFLAGS_BLACKPOINTCOMPENSATION,
   cmsFLAGS_SOFTPROOFING,
   cmsFLAGS_NOCACHE,
 } from 'lcms-wasm';
 import type { ColorSpaceKind } from '../icc/profileInfo';
+import type { RenderingIntent } from './intents';
+import { INTENT_VALUE } from './intents';
 
-export type RenderingIntent =
-  | 'perceptual'
-  | 'relative-colorimetric'
-  | 'saturation'
-  | 'absolute-colorimetric';
-
-export const INTENT_VALUE: Record<RenderingIntent, number> = {
-  perceptual: INTENT_PERCEPTUAL,
-  'relative-colorimetric': INTENT_RELATIVE_COLORIMETRIC,
-  saturation: INTENT_SATURATION,
-  'absolute-colorimetric': INTENT_ABSOLUTE_COLORIMETRIC,
-};
-
-export const INTENT_LABEL: Record<RenderingIntent, string> = {
-  perceptual: '感知式 (Perceptual, 0)',
-  'relative-colorimetric': '相对色度 (Relative Colorimetric, 1)',
-  saturation: '饱和度 (Saturation, 2)',
-  'absolute-colorimetric': '绝对色度 (Absolute Colorimetric, 3)',
-};
+export { INTENT_VALUE, INTENT_LABEL } from './intents';
+export type { RenderingIntent } from './intents';
 
 const EXTRA_SH = (e: number) => e << 7;
 const ALPHA_EXTRA = EXTRA_SH(1);

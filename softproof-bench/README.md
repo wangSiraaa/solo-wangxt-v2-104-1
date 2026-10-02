@@ -23,6 +23,19 @@
    - 图像文件都带 `softproof-bench-conversion` 标记（PNG tEXt / TIFF ImageDescription）。
 6. **防止二次转换**：再次导入带标记的“已转换”文件会被识别并拦截，不能把转换结果当原图再转一次。
 
+## 本机批次打样作业（Batch）
+
+顶部“批次打样作业”标签页把同一版式的多张原稿作为**一个可恢复的本机批次**处理，无需逐张重复配置，也不上传任何文件。
+
+- **条目冻结**：每张图在加入时冻结原图字节、容器/位深、像素哈希（FNV-1a64）、嵌入 ICC 快照，以及实际生效的源/目标配置、渲染意图、黑点补偿（`StoredBatchItem`）。
+- **待确认闸门**：无嵌入 ICC 的图片停在“待确认”，**必须人工选择源配置（assumption）**才能入队；入队前缺失任何一项都会被拒绝。
+- **状态机**：`待确认 → 排队 → 转换中 → 成功 / 失败 / 已取消`，全程持久化到 IndexedDB（`batch-jobs` / `batch-items` / `batch-outputs`）。
+- **尝试历史与并发安全**：每次转换是一个 attempt；重试追加新 attempt，旧失败/取消记录不抹除。结果回传时同时校验 **状态仍为转换中 + attempt id + settingsRevision + 无既有成功输出**，迟到结果、改配置后的旧结果、取消后的迟到像素一律丢弃。
+- **刷新恢复**：刷新时把“转换中”条目复位为排队（中断的 attempt 记为 canceled），只续跑非终态条目；成功输出已在 `batch-outputs` 中，绝不重复生成。
+- **不合并同像素条目**：条目按自身 id 独立存储；同一像素文件以不同人工假设入队是两个条目、两份输出。
+- **批次清单导出**：每张成功图导出嵌入目标 ICC 且带转换标记的 PNG/TIFF，另导出一份 `*.batch-manifest.json`，把每个输出文件与其**各自独立**的源/目标配置、假设、意图码、BPC、attempt id 及失败历史逐一关联。
+- 已带转换标记的文件不能加入批次（同单张流程的防二次转换纪律）。
+
 > ⚠️ 未经校准/特征化的显示器上，软打样**不承诺**等同实物打样或印刷成品颜色；本工具用于流程核对、配置确认与数值预览。
 
 ## 目录
@@ -30,12 +43,13 @@
 ```
 src/lib/
   icc/      ICC 头/标签解析、JPEG APP2 / PNG iCCP / WebP ICCP 提取、出处标记检测
-  color/    LittleCMS WASM 封装、转换引擎、CIEDE2000、设置记录
+  color/    LittleCMS WASM 封装、转换引擎、CIEDE2000、设置记录、意图常量
+  batch/    本机批次作业：类型、状态机/竞态防护、IndexedDB 管理器、批次清单、导出
   codec/    WASM 解码，PNG / CMYK-TIFF 编码（可嵌 ICC）
   db/       IndexedDB、内置开放配置、应用状态（runes）
-  workers/  后台转换线程与主线程 client
+  workers/  后台转换线程与主线程 client（token 匹配、协作取消、DEV 故障/延迟注入）
   components/  Svelte UI
-scripts/      Node 单测、夹具生成、Playwright E2E
+scripts/      Node 单测、夹具生成、Playwright E2E（单张 + 批次）
 public/profiles/  内置开放 ICC（Elle Stone，公有领域/CC0）
 test-assets/       色块图、透明边缘图、开放 CMYK 配置（CC0）
 ```
@@ -72,6 +86,8 @@ E2E_URL=http://localhost:5199 npm run test:e2e
 ```
 
 E2E 覆盖：嵌入/缺失配置（强制假设）、CIE RGB 与 CMYK 目标、JPEG(APP2)、16-bit PNG、透明边缘、取样、PNG/TIFF 导出、带标记文件再导入拦截。
+
+批次 E2E（`npm run test:e2e:batch`）覆盖：两张不同嵌入配置图片各自成功并保留快照；无 ICC 图在人工确认前停在待确认且不进队列；同像素不同人工假设不合并；转换中刷新后只续跑未终态条目、已完成输出不重复生成；失败后重试生成新尝试记录而保留原失败与其他条目成功；已转换文件禁止作为批次原图。
 
 ### 用独立色彩工具验证导出文件
 

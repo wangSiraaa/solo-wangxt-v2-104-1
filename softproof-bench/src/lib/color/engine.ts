@@ -116,8 +116,17 @@ function packed8ToRGBA(p8: Uint8Array, channels: number, pixelCount: number): Ui
   return out;
 }
 
-export async function convert(decoded: DecodedImage, profiles: ProfileSet, params: EngineParams): Promise<ConvertResult> {
+/** Checked between conversion stages so a canceled batch item can stop early. */
+export type CancelCheck = () => void;
+
+export async function convert(
+  decoded: DecodedImage,
+  profiles: ProfileSet,
+  params: EngineParams,
+  checkCancel?: CancelCheck,
+): Promise<ConvertResult> {
   const lcms = await getMod();
+  checkCancel?.();
   const src = openProfile(lcms, profiles.source.bytes, 'source');
   const dst = openProfile(lcms, profiles.target.bytes, 'target');
   const srgb = { handle: lcms.cmsCreate_sRGBProfile() };
@@ -126,6 +135,7 @@ export async function convert(decoded: DecodedImage, profiles: ProfileSet, param
   const pixelCount = decoded.width * decoded.height;
   const bytesPerSample: 1 | 2 = norm.bitDepth === 16 ? 2 : 1;
 
+  checkCancel?.();
   // ---- Stage 1: source -> target device (alpha carried via COPY_ALPHA) ----
   const convertedPacked = transformPixels({
     mod: lcms,
@@ -139,6 +149,7 @@ export async function convert(decoded: DecodedImage, profiles: ProfileSet, param
     params: { intent: params.intent, blackPointCompensation: params.blackPointCompensation },
   });
 
+  checkCancel?.();
   const dstColorChannels = colorChannelsOf(dst.colorSpace);
   const convertedBytes =
     convertedPacked instanceof Uint16Array

@@ -1,16 +1,52 @@
 <script lang="ts">
   import { getApp } from './lib/db/state.svelte';
+  import { getBatch } from './lib/batch/batch.svelte';
   import ProfilePanel from './lib/components/ProfilePanel.svelte';
   import ProjectsPanel from './lib/components/ProjectsPanel.svelte';
   import CanvasView from './lib/components/CanvasView.svelte';
   import Sampler from './lib/components/Sampler.svelte';
   import ExportBar from './lib/components/ExportBar.svelte';
+  import BatchWorkbench from './lib/components/BatchWorkbench.svelte';
   import { PROFILE_ATTRIBUTION } from './lib/db/builtinProfiles';
+  import { setTestFault, setTestDelay } from './lib/workers/client';
   import type { SampleInfo } from './lib/color/engine';
 
   const app = getApp();
   const s = app.state;
-  app.init();
+  const batch = getBatch();
+  app.init().then(() => {
+    void batch.setProfiles(app.state.profiles);
+    void batch.init();
+    installTestHook();
+  });
+
+  let view = $state<'single' | 'batch'>('single');
+
+  // Keep the batch manager's profile library in sync after imports.
+  let lastProfileCount = 0;
+  $effect(() => {
+    if (app.state.profiles.length !== lastProfileCount) {
+      lastProfileCount = app.state.profiles.length;
+      void batch.setProfiles(app.state.profiles);
+    }
+  });
+
+  // DEV-only E2E hook for the failed -> retry path; never present in prod build.
+  function installTestHook() {
+    if (!import.meta.env.DEV) return;
+    const w = window as unknown as {
+      __softproofTest?: {
+        setFault: (f: string | null) => void;
+        setDelay: (ms: number) => void;
+        batch: typeof batch;
+      };
+    };
+    w.__softproofTest = {
+      setFault: (f) => setTestFault(f),
+      setDelay: (ms: number) => setTestDelay(ms),
+      batch,
+    };
+  }
 
   // Original pixels rendered as-is (jsquash raw RGBA; the browser is not asked
   // to convert). The transform itself always goes through the worker.
@@ -97,15 +133,28 @@
     </div>
   </header>
 
+  <nav class="tabs">
+    <button class:on={view === 'single'} onclick={() => (view = 'single')} data-tab="single">
+      单张软打样
+    </button>
+    <button class:on={view === 'batch'} onclick={() => (view = 'batch')} data-tab="batch">
+      批次打样作业
+    </button>
+  </nav>
+
   {#if s.initError}
     <div class="banner danger">初始化失败：{s.initError}</div>
   {/if}
-  {#if s.notice}
+  {#if s.notice && view === 'single'}
     <button class="banner" onclick={clearNotice}>{s.notice}（点击关闭）</button>
   {/if}
 
   {#if !s.ready}
     <div class="loading">正在加载 LittleCMS WASM 与内置开放配置…</div>
+  {:else if view === 'batch'}
+    <div class="batchwrap">
+      <BatchWorkbench profiles={s.profiles} />
+    </div>
   {:else}
     <div class="columns">
       <aside class="sidebar scroll">
@@ -279,5 +328,29 @@
   }
   .rules li {
     margin-bottom: 5px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 6px 12px 0;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs button {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-bottom: none;
+    background: transparent;
+    color: var(--muted);
+  }
+  .tabs button.on {
+    background: var(--bg);
+    color: var(--text);
+    border-color: var(--line);
+  }
+  .batchwrap {
+    flex: 1;
+    min-height: 0;
+    padding: 12px;
   }
 </style>

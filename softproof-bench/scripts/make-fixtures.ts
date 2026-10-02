@@ -4,6 +4,8 @@
  *                             iCCP = open sRGB profile
  *  2. patches-noicc.png     - same pixel content, no profile (forces source choice)
  *  3. patches-srgb16.png    - 16-bit RGB variant with iCCP
+ *  4. patches-ciergb.png    - same pixels tagged with the open CIE RGB profile
+ *                             (batch test: two images, different embedded ICCs)
  *
  * Uses the app's own PNG encoder so fixtures exercise the same code path.
  */
@@ -16,6 +18,7 @@ const root = resolve(import.meta.dirname, '..');
 const dir = resolve(root, 'test-assets/browser');
 mkdirSync(dir, { recursive: true });
 const srgbIcc = new Uint8Array(readFileSync(resolve(root, 'public/profiles/sRGB-elle-V2-srgbtrc.icc')));
+const cieIcc = new Uint8Array(readFileSync(resolve(root, 'public/profiles/CIERGB-elle-V2-g22.icc')));
 
 const W = 12;
 const H = 8;
@@ -85,6 +88,19 @@ writeFileSync(
     hasAlpha: true,
     icc: srgbIcc,
   }),
+);
+
+// Same pixel content tagged with a DIFFERENT embedded profile (CIE RGB).
+writeFileSync(
+  resolve(dir, 'patches-ciergb.png'),
+  encodePng({ width: W, height: H, colorChannels: 3, bitDepth: 8, data: rgba, hasAlpha: true, icc: cieIcc }),
+);
+
+// A second no-ICC copy with a distinct name: same pixels, different manual
+// assumptions in the same batch must NOT be merged.
+writeFileSync(
+  resolve(dir, 'patches-noicc-copy.png'),
+  encodePng({ width: W, height: H, colorChannels: 3, bitDepth: 8, data: rgba, hasAlpha: true }),
 );
 
 console.log('fixtures written to', dir);

@@ -146,5 +146,265 @@ check('dE00 identical = 0', deltaE2000({ L: 50, a: 10, b: -10 }, { L: 50, a: 10,
 const h1 = fnv1a64(new Uint8Array([1, 2, 3]));
 check('hash stable & hex16', h1.length === 16 && h1 === fnv1a64(new Uint8Array([1, 2, 3])) && h1 !== fnv1a64(new Uint8Array([1, 2, 4])));
 
+// ---------------------------------------------------------------------------
+console.log('# batch proofing state machine / race guards');
+import {
+  acceptResultCheck,
+  canAddToBatch,
+  canTransition,
+  finalizeAttempt,
+  isTerminal,
+  missingConfirmations,
+  recoverStatus,
+} from '../src/lib/batch/guards';
+import type { BatchAttempt } from '../src/lib/batch/types';
+
+check('terminal statuses', isTerminal('succeeded') && isTerminal('failed') && isTerminal('canceled') && !isTerminal('queued'));
+check(
+  'refresh: only converting is resumed',
+  recoverStatus('converting') === 'queued' &&
+    recoverStatus('succeeded') === 'succeeded' &&
+    recoverStatus('failed') === 'failed' &&
+    recoverStatus('queued') === 'queued',
+);
+check('converted original cannot join batch', canAddToBatch(true).ok === false && canAddToBatch(false).ok === true);
+
+check(
+  'no-ICC without source stays unconfirmed',
+  missingConfirmations({ embeddedProfile: null, source: null, target: {}, intent: 'x', blackPointCompensation: true }).includes(
+    '源配置（图片无嵌入 ICC，必须人工确认）',
+  ),
+);
+check(
+  'embedded with all settings confirmed',
+  missingConfirmations({ embeddedProfile: {}, source: {}, target: {}, intent: 'x', blackPointCompensation: true }).length === 0,
+);
+
+// late result cannot overwrite canceled / changed / succeeded items
+const now = new Date().toISOString();
+const baseAttempt: BatchAttempt = {
+  id: 'att1',
+  startedAt: now,
+  finishedAt: null,
+  outcome: 'running',
+  settings: {
+    sourceRefId: 's',
+    sourceOrigin: 'embedded',
+    targetRefId: 't',
+    intent: 'relative-colorimetric',
+    blackPointCompensation: true,
+    settingsRevision: 1,
+  },
+  error: null,
+  outputKey: null,
+};
+check(
+  'result accepted only when converting + same attempt + same revision',
+  acceptResultCheck({
+    currentStatus: 'converting',
+    attemptId: 'att1',
+    responseAttemptId: 'att1',
+    settingsRevision: 1,
+    responseRevision: 1,
+    successfulAttemptId: null,
+  }) === null,
+);
+check(
+  'late result for a stale attempt is rejected',
+  acceptResultCheck({
+    currentStatus: 'converting',
+    attemptId: 'att2',
+    responseAttemptId: 'att1',
+    settingsRevision: 1,
+    responseRevision: 1,
+    successfulAttemptId: null,
+  }) !== null,
+);
+check(
+  'result after settings revision bump is rejected',
+  acceptResultCheck({
+    currentStatus: 'converting',
+    attemptId: 'att1',
+    responseAttemptId: 'att1',
+    settingsRevision: 2,
+    responseRevision: 1,
+    successfulAttemptId: null,
+  }) !== null,
+);
+check(
+  'result after cancel is rejected',
+  acceptResultCheck({
+    currentStatus: 'canceled',
+    attemptId: 'att1',
+    responseAttemptId: 'att1',
+    settingsRevision: 1,
+    responseRevision: 1,
+    successfulAttemptId: null,
+  }) !== null,
+);
+check(
+  'result rejected when success already stored',
+  acceptResultCheck({
+    currentStatus: 'converting',
+    attemptId: 'att1',
+    responseAttemptId: 'att1',
+    settingsRevision: 1,
+    responseRevision: 1,
+    successfulAttemptId: 'att0',
+  }) !== null,
+);
+
+// retry appends a NEW finalized attempt; failed history is preserved
+const failedAttempt = finalizeAttempt(baseAttempt, { outcome: 'failed', error: 'boom', finishedAt: now });
+const retryAttempt: BatchAttempt = { ...baseAttempt, id: 'att2', startedAt: now, settings: { ...baseAttempt.settings, settingsRevision: 2 } };
+const retryOk = finalizeAttempt(retryAttempt, { outcome: 'succeeded', outputKey: 'item:att2', finishedAt: now });
+check(
+  'retry keeps old failure and records new success separately',
+  failedAttempt.outcome === 'failed' &&
+    failedAttempt.error === 'boom' &&
+    failedAttempt.id === 'att1' &&
+    retryOk.outcome === 'succeeded' &&
+    retryOk.outputKey === 'item:att2' &&
+    retryOk.id === 'att2',
+);
+
+check(
+  'succeeded cannot transition anywhere',
+  !canTransition('succeeded', 'queued') && canTransition('failed', 'queued') && canTransition('canceled', 'queued'),
+);
+
+console.log('# batch manifest links each output to its own settings');
+import { buildBatchManifest } from '../src/lib/batch/manifest';
+import type { BatchItemView, FrozenProfile } from '../src/lib/batch/types';
+
+const mkProfile = (id: string, cs: 'RGB' | 'CMYK', origin: FrozenProfile['origin']): FrozenProfile => ({
+  refId: id,
+  description: id,
+  colorSpace: cs,
+  origin,
+  bytes: new Uint8Array([1, 2, 3]),
+  byteLength: 3,
+});
+const mkItem = (ordinal: number, overrides: Partial<BatchItemView>): BatchItemView => {
+  const assumption = overrides.sourceIsAssumption ?? false;
+  return {
+    id: `item${ordinal}`,
+    jobId: 'job1',
+    createdAt: now,
+    updatedAt: now,
+    ordinal,
+    imageName: `img${ordinal}.png`,
+    container: 'png',
+    bitDepth: 8,
+    width: 4,
+    height: 3,
+    pixelHash: 'abc' + ordinal,
+    embeddedProfile: overrides.embeddedProfile ?? null,
+    provenanceConverted: false,
+    source:
+      overrides.source ??
+      mkProfile(
+        assumption ? 'builtin-srgb-elle' : 'embedded:srgb',
+        'RGB',
+        assumption ? 'manual-assumption' : 'embedded',
+      ),
+    sourceIsAssumption: assumption,
+    target: mkProfile('builtin-ciergb-elle', 'RGB', 'builtin-open'),
+    intent: 'relative-colorimetric',
+    blackPointCompensation: true,
+    proofIntent: 'relative-colorimetric',
+    settingsRevision: 1,
+    status: 'succeeded',
+    attempts: [],
+    successfulAttemptId: `att-${ordinal}`,
+    error: null,
+    bytesLoaded: false,
+    ...overrides,
+  };
+};
+const item1 = mkItem(0, {
+  embeddedProfile: mkProfile('embedded:srgb', 'RGB', 'embedded'),
+  source: mkProfile('embedded:srgb', 'RGB', 'embedded'),
+  sourceIsAssumption: false,
+});
+const item2 = mkItem(1, { sourceIsAssumption: true });
+const mkAtt = (id: string, rev: number): BatchAttempt => ({
+  ...baseAttempt,
+  id,
+  outcome: 'succeeded',
+  finishedAt: now,
+  outputKey: `x:${id}`,
+  settings: { ...baseAttempt.settings, settingsRevision: rev },
+});
+item2.attempts = [
+  { ...baseAttempt, id: 'oldfailed', outcome: 'failed', error: 'first failure', finishedAt: now },
+  mkAtt('att-2', 1),
+];
+const manifest = buildBatchManifest(
+  { id: 'job1', name: '批次A' },
+  [
+    {
+      item: item1,
+      attempt: mkAtt('att-1', 1),
+      outputFile: '001-img1.png',
+      outputKind: 'rgb-png',
+      outputBitDepth: 8,
+      targetColorSpace: 'RGB',
+      proofIntent: 'relative-colorimetric',
+    },
+    {
+      item: item2,
+      attempt: mkAtt('att-2', 1),
+      outputFile: '002-img2.png',
+      outputKind: 'rgb-png',
+      outputBitDepth: 8,
+      targetColorSpace: 'RGB',
+      proofIntent: 'relative-colorimetric',
+    },
+  ],
+);
+check('manifest has one entry per output', manifest.entries.length === 2);
+check(
+  'entry 1 source is embedded',
+  manifest.entries[0].source.origin === 'embedded' && manifest.entries[0].sourceAssumption.missingEmbedded === false,
+);
+check(
+  'entry 2 source is an assumption + carries failed attempt history',
+  manifest.entries[1].source.origin === 'assumed' &&
+    manifest.entries[1].sourceAssumption.missingEmbedded === true &&
+    manifest.entries[1].attempt.failedHistory.length === 1 &&
+    manifest.entries[1].attempt.failedHistory[0].attemptId === 'oldfailed',
+);
+check(
+  'each output references its own attempt id and file',
+  manifest.entries[0].outputFile === '001-img1.png' &&
+    manifest.entries[0].attemptId === 'att-1' &&
+    manifest.entries[1].outputFile === '002-img2.png' &&
+    manifest.entries[1].attemptId === 'att-2',
+);
+check('manifest records intent code + bpc', manifest.entries[0].transform.intentCode === 1 && manifest.entries[0].transform.blackPointCompensation);
+// same pixel file, different assumptions => different items, not merged:
+const dupA = mkItem(2, { id: 'dup-a', pixelHash: 'same-bytes', source: mkProfile('builtin-srgb-elle', 'RGB', 'manual-assumption') });
+const dupB = mkItem(3, { id: 'dup-b', pixelHash: 'same-bytes', source: mkProfile('builtin-ciergb-elle', 'RGB', 'manual-assumption') });
+const dupManifest = buildBatchManifest(
+  { id: 'j', name: 'dup' },
+  [dupA, dupB].map((it, i) => ({
+    item: it,
+    attempt: mkAtt(`dup-att${i}`, 1),
+    outputFile: `o${i}.png`,
+    outputKind: 'rgb-png' as const,
+    outputBitDepth: 8 as const,
+    targetColorSpace: 'RGB',
+    proofIntent: 'relative-colorimetric' as const,
+  })),
+);
+check(
+  'identical pixels with different assumptions are not merged',
+  dupManifest.entries.length === 2 &&
+    dupManifest.entries[0].image.pixelHash === dupManifest.entries[1].image.pixelHash &&
+    dupManifest.entries[0].source.id !== dupManifest.entries[1].source.id &&
+    dupManifest.entries[0].itemId !== dupManifest.entries[1].itemId,
+);
+
 console.log(failures ? `\n${failures} FAILURES` : '\nALL NODE TESTS PASSED');
 process.exit(failures ? 1 : 0);

@@ -2,6 +2,11 @@
  * Main-thread client for the color worker. Requests keep the original image
  * and profile bytes in memory; transferred buffers are copies so the saved
  * project is never detached.
+ *
+ * Batch conversions use runConvertToken(): every request has an explicit
+ * numeric token; cancelConvert() forwards a cooperative cancel and late
+ * results are matched by token at the caller (the batch manager), so they can
+ * never overwrite a changed/canceled item.
  */
 import ColorWorker from './color.worker.ts?worker';
 import type { EngineParams, SampleInfo } from '../color/engine';
@@ -27,12 +32,20 @@ function ensureWorker(): Worker {
   if (!worker) {
     worker = new ColorWorker();
     worker.onmessage = (ev: MessageEvent) => {
-      const { id, error } = ev.data;
+      const { id, error, aborted } = ev.data as {
+        id: number;
+        error?: string;
+        aborted?: boolean;
+        type: string;
+      };
       const p = pending.get(id);
-      if (!p) return;
+      if (!p) return; // late/unknown response - nobody is waiting
       pending.delete(id);
-      if (error) p.reject(new Error(error));
-      else if (ev.data.type === 'result') p.resolve(toConverted(ev.data.result));
+      if (error) {
+        const err = new Error(error);
+        if (aborted) err.name = 'AbortError';
+        p.reject(err);
+      } else if (ev.data.type === 'result') p.resolve(toConverted(ev.data.result));
       else p.resolve(ev.data.info as SampleInfo);
     };
     worker.onerror = (e) => {
@@ -72,14 +85,16 @@ function toConverted(r: {
   };
 }
 
-export function runConvert(opts: {
-  imageBytes: Uint8Array;
-  sourceIcc: Uint8Array;
-  targetIcc: Uint8Array;
-  params: EngineParams;
-}): Promise<ConvertedPayload> {
+function postConvert(
+  opts: {
+    imageBytes: Uint8Array;
+    sourceIcc: Uint8Array;
+    targetIcc: Uint8Array;
+    params: EngineParams;
+  },
+  id: number,
+): Promise<ConvertedPayload> {
   const w = ensureWorker();
-  const id = seq++;
   const payload = {
     type: 'convert' as const,
     id,
@@ -92,6 +107,51 @@ export function runConvert(opts: {
     pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
     w.postMessage(payload, [payload.imageBytes, payload.sourceIcc, payload.targetIcc]);
   });
+}
+
+export function runConvert(opts: {
+  imageBytes: Uint8Array;
+  sourceIcc: Uint8Array;
+  targetIcc: Uint8Array;
+  params: EngineParams;
+}): Promise<ConvertedPayload> {
+  const id = seq++;
+  return postConvert(opts, id);
+}
+
+export interface ConvertToken {
+  requestId: number;
+  promise: Promise<ConvertedPayload>;
+}
+
+/** Batch path: caller keeps the token and can cancel; results match by id. */
+export function runConvertToken(opts: {
+  imageBytes: Uint8Array;
+  sourceIcc: Uint8Array;
+  targetIcc: Uint8Array;
+  params: EngineParams;
+}): ConvertToken {
+  const id = seq++;
+  return { requestId: id, promise: postConvert(opts, id) };
+}
+
+export function cancelConvert(requestId: number): void {
+  ensureWorker().postMessage({ type: 'cancel', id: requestId });
+}
+
+/** DEV-only fault injection for E2E of the failed -> retry path. */
+export function setTestFault(fault: string | null): void {
+  ensureWorker().postMessage({ type: '__test-set-fault', fault });
+}
+
+/** DEV-only delay injection (ms per convert) for the mid-convert reload test. */
+export function setTestDelay(ms: number): void {
+  ensureWorker().postMessage({ type: '__test-set-delay', ms });
+}
+
+/** Warm the worker (instantiate WASM) before the first real conversion. */
+export function pingWorker(): void {
+  ensureWorker();
 }
 
 export function runSample(opts: {
