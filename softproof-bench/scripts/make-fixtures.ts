@@ -4,6 +4,11 @@
  *                             iCCP = open sRGB profile
  *  2. patches-noicc.png     - same pixel content, no profile (forces source choice)
  *  3. patches-srgb16.png    - 16-bit RGB variant with iCCP
+ *  4. patches-ciergb.png    - 8-bit RGBA, iCCP = open CIE RGB profile (a second,
+ *                             distinct embedded profile for batch tests)
+ *  5. broken-icc.png        - valid signature + IHDR + iCCP, then truncated:
+ *                             ICC extraction succeeds but decoding fails
+ *                             (drives the batch failure/retry path)
  *
  * Uses the app's own PNG encoder so fixtures exercise the same code path.
  */
@@ -16,6 +21,7 @@ const root = resolve(import.meta.dirname, '..');
 const dir = resolve(root, 'test-assets/browser');
 mkdirSync(dir, { recursive: true });
 const srgbIcc = new Uint8Array(readFileSync(resolve(root, 'public/profiles/sRGB-elle-V2-srgbtrc.icc')));
+const ciergbIcc = new Uint8Array(readFileSync(resolve(root, 'public/profiles/CIERGB-elle-V2-g22.icc')));
 
 const W = 12;
 const H = 8;
@@ -86,5 +92,34 @@ writeFileSync(
     icc: srgbIcc,
   }),
 );
+
+// Same geometry, channel-rotated pixels, embedded CIE RGB profile: a second
+// distinct embedded profile for the batch acceptance tests.
+const rgbaB = makeRGBA();
+for (let i = 0; i < rgbaB.length; i += 4) {
+  const r = rgbaB[i];
+  rgbaB[i] = rgbaB[i + 2];
+  rgbaB[i + 2] = r;
+}
+writeFileSync(
+  resolve(dir, 'patches-ciergb.png'),
+  encodePng({ width: W, height: H, colorChannels: 3, bitDepth: 8, data: rgbaB, hasAlpha: true, icc: ciergbIcc }),
+);
+
+// Truncated right after the iCCP chunk: the container is a PNG, the embedded
+// profile still extracts, but pixel decoding must fail.
+const full = encodePng({ width: W, height: H, colorChannels: 3, bitDepth: 8, data: rgba, hasAlpha: true, icc: srgbIcc });
+let cut = 8;
+while (cut + 8 <= full.length) {
+  const len = (full[cut] << 24) | (full[cut + 1] << 16) | (full[cut + 2] << 8) | full[cut + 3];
+  const type = String.fromCharCode(full[cut + 4], full[cut + 5], full[cut + 6], full[cut + 7]);
+  const end = cut + 8 + len + 4;
+  if (type === 'iCCP') {
+    cut = end + 12; // keep all of iCCP plus a dangling partial next chunk
+    break;
+  }
+  cut = end;
+}
+writeFileSync(resolve(dir, 'broken-icc.png'), full.subarray(0, Math.min(cut, full.length - 1)));
 
 console.log('fixtures written to', dir);

@@ -1,16 +1,25 @@
 <script lang="ts">
   import { getApp } from './lib/db/state.svelte';
+  import { getBatchStore } from './lib/batch/batchStore.svelte';
   import ProfilePanel from './lib/components/ProfilePanel.svelte';
   import ProjectsPanel from './lib/components/ProjectsPanel.svelte';
   import CanvasView from './lib/components/CanvasView.svelte';
   import Sampler from './lib/components/Sampler.svelte';
   import ExportBar from './lib/components/ExportBar.svelte';
+  import BatchPanel from './lib/components/BatchPanel.svelte';
   import { PROFILE_ATTRIBUTION } from './lib/db/builtinProfiles';
   import type { SampleInfo } from './lib/color/engine';
 
   const app = getApp();
   const s = app.state;
   app.init();
+  // Batch jobs live in IndexedDB and resume unfinished work on load, so the
+  // store initializes (and its queue pump restarts) no matter which view is
+  // shown first.
+  const batchStore = getBatchStore();
+  batchStore.init();
+
+  let view = $state<'single' | 'batch'>('single');
 
   // Original pixels rendered as-is (jsquash raw RGBA; the browser is not asked
   // to convert). The transform itself always goes through the worker.
@@ -95,6 +104,10 @@
     <div class="disc" role="note">
       未经校准/特征化的显示器上，软打样不承诺等同实物打样；本工具先确认图片的源色彩空间，再呈现转换到印厂配置后的变化。
     </div>
+    <nav class="tabs" aria-label="视图切换">
+      <button class:active={view === 'single'} onclick={() => (view = 'single')}>单张打样</button>
+      <button class:active={view === 'batch'} onclick={() => (view = 'batch')}>批次打样作业</button>
+    </nav>
   </header>
 
   {#if s.initError}
@@ -106,6 +119,8 @@
 
   {#if !s.ready}
     <div class="loading">正在加载 LittleCMS WASM 与内置开放配置…</div>
+  {:else if view === 'batch'}
+    <BatchPanel {app} />
   {:else}
     <div class="columns">
       <aside class="sidebar scroll">
@@ -222,6 +237,21 @@
     background: #7a5a2318;
     border-radius: 8px;
     padding: 6px 10px;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+  }
+  .tabs button {
+    border-radius: 99px;
+    padding: 5px 14px;
+    font-size: 12.5px;
+  }
+  .tabs button.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #08131f;
+    font-weight: 600;
   }
   .banner {
     padding: 8px 16px;

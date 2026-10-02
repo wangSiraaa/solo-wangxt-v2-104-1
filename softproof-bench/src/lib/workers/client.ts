@@ -19,6 +19,22 @@ export interface ConvertedPayload {
   hasAlpha: boolean;
 }
 
+/** Distinguishable rejection produced by cancelTask (and worker-side aborts). */
+export class TaskCancelledError extends Error {
+  constructor(message = '任务已取消') {
+    super(message);
+    this.name = 'TaskCancelled';
+  }
+}
+export const isTaskCancelled = (e: unknown): boolean =>
+  e instanceof TaskCancelledError || (e instanceof Error && e.name === 'TaskCancelled');
+
+export interface ConvertHandle {
+  /** Worker task id, stable for the whole life of the request. */
+  id: number;
+  promise: Promise<ConvertedPayload>;
+}
+
 let worker: Worker | null = null;
 let seq = 1;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -29,9 +45,12 @@ function ensureWorker(): Worker {
     worker.onmessage = (ev: MessageEvent) => {
       const { id, error } = ev.data;
       const p = pending.get(id);
+      // Unknown id: the task was cancelled (or already settled) — its late
+      // reply is dropped here and can never reach a caller.
       if (!p) return;
       pending.delete(id);
       if (error) p.reject(new Error(error));
+      else if (ev.data.cancelled) p.reject(new TaskCancelledError());
       else if (ev.data.type === 'result') p.resolve(toConverted(ev.data.result));
       else p.resolve(ev.data.info as SampleInfo);
     };
@@ -72,12 +91,17 @@ function toConverted(r: {
   };
 }
 
-export function runConvert(opts: {
+/**
+ * Post a convert request and return its task id immediately, so callers
+ * (the batch runner) can persist the id before the work finishes and can
+ * cancel this exact task later.
+ */
+export function startConvert(opts: {
   imageBytes: Uint8Array;
   sourceIcc: Uint8Array;
   targetIcc: Uint8Array;
   params: EngineParams;
-}): Promise<ConvertedPayload> {
+}): ConvertHandle {
   const w = ensureWorker();
   const id = seq++;
   const payload = {
@@ -88,10 +112,34 @@ export function runConvert(opts: {
     targetIcc: copy(ab(opts.targetIcc)),
     params: opts.params,
   };
-  return new Promise((resolve, reject) => {
+  const promise = new Promise<ConvertedPayload>((resolve, reject) => {
     pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
     w.postMessage(payload, [payload.imageBytes, payload.sourceIcc, payload.targetIcc]);
   });
+  return { id, promise };
+}
+
+export function runConvert(opts: {
+  imageBytes: Uint8Array;
+  sourceIcc: Uint8Array;
+  targetIcc: Uint8Array;
+  params: EngineParams;
+}): Promise<ConvertedPayload> {
+  return startConvert(opts).promise;
+}
+
+/**
+ * Cancel a running/queued task: its promise rejects with TaskCancelledError
+ * and the worker is told to drop the task at its next checkpoint. A result
+ * that still arrives afterwards has no pending entry and is discarded.
+ */
+export function cancelTask(id: number): void {
+  const p = pending.get(id);
+  if (p) {
+    pending.delete(id);
+    p.reject(new TaskCancelledError());
+  }
+  worker?.postMessage({ type: 'cancel', id });
 }
 
 export function runSample(opts: {

@@ -9,6 +9,7 @@ import type { ColorSpaceKind } from '../icc/profileInfo';
 
 export const PROVENANCE_KEY = 'softproof-bench-conversion';
 export const RECORD_FORMAT = 'softproof-bench-settings/1';
+export const APP_VERSION = '0.1.0';
 
 export interface ProfileRef {
   /** Stable id inside this browser's IndexedDB, or "builtin:<name>". */

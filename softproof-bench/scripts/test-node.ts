@@ -13,6 +13,14 @@ import { encodeTiffCmyk } from '../src/lib/codec/tiff';
 import { detectProvenance } from '../src/lib/icc/provenance';
 import { deltaE2000 } from '../src/lib/color/colorMath';
 import { fnv1a64 } from '../src/lib/color/hash';
+import {
+  recoveryTransition,
+  settingsKeyOf,
+  isTerminal,
+  type BatchTargetSettings,
+  type BatchSourceSettings,
+  type StoredBatchItem,
+} from '../src/lib/batch/types';
 
 const root = resolve(import.meta.dirname, '..');
 const outDir = resolve(root, 'test-out');
@@ -145,6 +153,82 @@ check('dE00 black-white ~100', Math.abs(de - 100) < 0.01, String(de));
 check('dE00 identical = 0', deltaE2000({ L: 50, a: 10, b: -10 }, { L: 50, a: 10, b: -10 }) === 0);
 const h1 = fnv1a64(new Uint8Array([1, 2, 3]));
 check('hash stable & hex16', h1.length === 16 && h1 === fnv1a64(new Uint8Array([1, 2, 3])) && h1 !== fnv1a64(new Uint8Array([1, 2, 4])));
+
+console.log('# batch job model (settings signature / recovery)');
+{
+  const target: BatchTargetSettings = {
+    targetProfileId: 'builtin-ciergb-elle',
+    targetDescription: 'CIE RGB',
+    targetColorSpace: 'RGB',
+    targetIcc: new Uint8Array(cieIcc),
+    intent: 'relative-colorimetric',
+    blackPointCompensation: true,
+    proofIntent: 'relative-colorimetric',
+  };
+  const assumedSrgb: BatchSourceSettings = {
+    kind: 'assumed',
+    profileId: 'builtin-srgb-elle',
+    description: 'sRGB',
+    colorSpace: 'RGB',
+    icc: new Uint8Array(srgbIcc),
+  };
+  const assumedCie: BatchSourceSettings = { ...assumedSrgb, profileId: 'builtin-ciergb-elle', icc: new Uint8Array(cieIcc) };
+  const embeddedSrgb: BatchSourceSettings = { kind: 'embedded', profileId: null, description: 'sRGB', colorSpace: 'RGB', icc: new Uint8Array(srgbIcc) };
+
+  const sameHash = 'abc123';
+  const kA = settingsKeyOf(sameHash, assumedSrgb, target);
+  check('identical bytes+settings -> identical key', kA === settingsKeyOf(sameHash, { ...assumedSrgb }, { ...target }));
+  check(
+    'same pixels under a different assumption -> different key (never merged)',
+    kA !== settingsKeyOf(sameHash, assumedCie, target),
+  );
+  check(
+    'embedded vs assumed with same ICC bytes -> different key',
+    settingsKeyOf(sameHash, embeddedSrgb, target) !== kA,
+  );
+  check(
+    'BPC flip changes the key',
+    settingsKeyOf(sameHash, assumedSrgb, { ...target, blackPointCompensation: false }) !== kA,
+  );
+  check(
+    'intent flip changes the key',
+    settingsKeyOf(sameHash, assumedSrgb, { ...target, intent: 'perceptual' }) !== kA,
+  );
+  check('different pixels, same settings -> different key', settingsKeyOf('other', assumedSrgb, target) !== kA);
+
+  const baseItem: StoredBatchItem = {
+    id: 'i1',
+    batchId: 'b1',
+    seq: 1,
+    name: 'a.png',
+    addedAt: 't0',
+    updatedAt: 't0',
+    status: 'converting',
+    imageBytes: new Uint8Array(4),
+    imageHash: 'h',
+    container: 'png',
+    bitDepth: 8,
+    embeddedIcc: null,
+    target,
+    source: assumedSrgb,
+    settingsKey: kA,
+    activeAttemptId: 'att1',
+    activeTaskId: 7,
+    attempts: [{ id: 'att1', taskId: 7, startedAt: 't0', settingsKey: kA }],
+    result: null,
+    lastError: '',
+  };
+  const recovered = recoveryTransition(baseItem, 't1');
+  check('refresh demotes converting -> queued', recovered.status === 'queued');
+  check(
+    'interrupted attempt closed as cancelled',
+    recovered.attempts[0].outcome === 'cancelled' && !!recovered.attempts[0].finishedAt,
+  );
+  check('active task/attempt cleared on recovery', recovered.activeAttemptId === null && recovered.activeTaskId === null);
+  const succeeded = recoveryTransition({ ...baseItem, status: 'succeeded' }, 't1');
+  check('terminal entries untouched by recovery', succeeded.status === 'succeeded' && succeeded.attempts[0].outcome === undefined);
+  check('isTerminal covers succeeded/failed/cancelled', isTerminal('succeeded') && isTerminal('failed') && isTerminal('cancelled') && !isTerminal('queued') && !isTerminal('converting') && !isTerminal('pending-confirm'));
+}
 
 console.log(failures ? `\n${failures} FAILURES` : '\nALL NODE TESTS PASSED');
 process.exit(failures ? 1 : 0);

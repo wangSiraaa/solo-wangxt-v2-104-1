@@ -3,6 +3,7 @@
   import { buildExport, downloadBytes } from '../codec/export';
   import { fnv1a64 } from '../color/hash';
   import {
+    APP_VERSION,
     DISCLAIMER,
     RECORD_FORMAT,
     type SettingsRecord,
@@ -13,8 +14,6 @@
   const s = app.state;
   let exporting = $state(false);
   let exportMsg = $state('');
-
-  const APP_VERSION = '0.1.0';
 
   async function doExport() {
     if (!s.image || !s.sourceProfile || !s.targetProfile || !s.result) return;
